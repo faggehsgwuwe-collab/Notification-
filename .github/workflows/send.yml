@@ -1,0 +1,67 @@
+name: Send Notification
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "নোটিফিকেশনের টাইটেল"
+        required: true
+      message:
+        description: "মেসেজ"
+        required: true
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        run: |
+          mkdir sender && cd sender
+          npm init -y
+          npm install firebase-admin
+      - name: Send
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          TITLE: ${{ inputs.title }}
+          BODY: ${{ inputs.message }}
+        run: |
+          cd sender
+          cat > send.js << 'EOF'
+          const { initializeApp, cert } = require("firebase-admin/app");
+          const { getDatabase } = require("firebase-admin/database");
+          const { getMessaging } = require("firebase-admin/messaging");
+          initializeApp({
+            credential: cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+            databaseURL: "https://notification-c30ee-default-rtdb.firebaseio.com"
+          });
+          const title = process.env.TITLE;
+          const body = process.env.BODY;
+          async function main() {
+            const db = getDatabase();
+            const snap = await db.ref("users").once("value");
+            const users = snap.val() || {};
+            const tokens = [];
+            Object.keys(users).forEach((uid) => {
+              if (users[uid] && users[uid].fcmToken) tokens.push(users[uid].fcmToken);
+            });
+            await db.ref("notifications").push({
+              title: title,
+              body: body,
+              date: new Date().toLocaleString("en-GB")
+            });
+            if (tokens.length === 0) { console.log("No tokens found"); return; }
+            for (let i = 0; i < tokens.length; i += 500) {
+              const res = await getMessaging().sendEachForMulticast({
+                tokens: tokens.slice(i, i + 500),
+                notification: { title: title, body: body }
+              });
+              console.log("success: " + res.successCount + ", failed: " + res.failureCount);
+              res.responses.forEach((r) => {
+                if (!r.success) console.log("reason: " + r.error.code);
+              });
+            }
+          }
+          main().then(() => process.exit(0)).catch((e) => { console.error("Error:", e.message); process.exit(1); });
+          EOF
+          node send.js
